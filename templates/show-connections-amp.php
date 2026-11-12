@@ -4,14 +4,14 @@
  *
  * @package  distributor
  */
-
+//phpcs:ignoreFile WordPressVIPMinimum.Security.Mustache.OutputNotation
 ?>
 
 <script id="dt-show-connections" type="text/plain" template="amp-mustache" data-ampdevmode>
 	<div class="inner">
 	{{#foundConnections}}
 		<?php /* translators: %s the post title */ ?>
-		<p><?php echo sprintf( esc_html__( 'Distribute &quot;%s&quot; to other connections.', 'distributor' ), esc_html( get_the_title( $post->ID ) ) ); ?></p>
+		<p><?php echo sprintf( esc_html__( 'Distribute &quot;%s&quot; to other connections.', 'distributor' ), '{{ postTitle }}' ); ?></p>
 
 		<div class="connections-selector">
 			<div>
@@ -45,7 +45,7 @@
 
 		<div class="connections-selected empty">
 			<header class="with-selected">
-				<?php esc_html_e( 'Selected connections', 'distributor' ); ?>
+				<span class="selected-connections-text"></span>
 				<button class="button button-link selectno-connections unavailable"><?php esc_html_e( 'Clear', 'distributor' ); ?></button>
 			</header>
 			<header class="no-selected">
@@ -55,19 +55,16 @@
 			<div class="selected-connections-list"></div>
 
 			<div class="action-wrapper">
-				<input type="hidden" id="dt-post-status" value="<?php echo esc_attr( $post->post_status ); ?>">
 				<?php
 				$as_draft = ( 'draft' !== $post->post_status ) ? true : false;
 				/**
 				 * Filter whether the 'As Draft' option appears in the push ui.
 				 *
-				 * @hook dt_allow_as_draft_distribute
+				 * @param bool    $as_draft   Whether the 'As Draft' option should appear.
+				 * @param object  $connection The connection being used to push.
+				 * @param WP_Post $post       The post being pushed.
 				 *
-				 * @param {bool}    $as_draft   Whether the 'As Draft' option should appear.
-				 * @param {object}  $connection The connection being used to push.
-				 * @param {WP_Post} $post       The post being pushed.
-				 *
-				 * @return {bool} Whether the 'As Draft' option should appear.
+				 * @return bool Whether the 'As Draft' option should appear.
 				 */
 				$as_draft = apply_filters( 'dt_allow_as_draft_distribute', $as_draft, $connection = null, $post );
 				?>
@@ -82,6 +79,7 @@
 			</div>
 			<div class="dt-error">
 				<?php esc_html_e( 'There were some issues distributing the post.', 'distributor' ); ?>
+				<ul class="details"></ul>
 			</div>
 		</div>
 

@@ -10,24 +10,9 @@
       "email": "opensource@10up.com"
     }
   ],
-  "repositories": [
-    {
-        "type":"package",
-        "package": {
-          "name": "georgestephanis/application-passwords",
-          "version":"0.1.2",
-          "source": {
-              "url": "https://github.com/WordPress/application-passwords.git",
-              "type": "git",
-              "reference":"0eef095b4dc984c26ee8149c01a323be83da715a"
-            }
-        }
-    }
-  ],
   "require": {
-    "php": ">=5.6",
-    "yahnis-elsts/plugin-update-checker": "^4.4",
-    "georgestephanis/application-passwords": "0.1.2",
+    "php": ">=7.4",
+    "yahnis-elsts/plugin-update-checker": "5.7",
     "ext-json": "*"
   },
   "autoload": {
@@ -35,17 +20,27 @@
       "Distributor\\": "includes/classes/"
     }
   },
-
   "require-dev": {
-    "10up/wpacceptance": "dev-master",
-    "10up/wp_mock": "~0.4",
-    "phpunit/phpunit": "~7.5",
-    "10up/phpcs-composer": "dev-master"
+    "phpunit/phpunit": "^8.5",
+    "yoast/phpunit-polyfills": "^1.0",
+    "automattic/vipwpcs": "^3.0",
+    "10up/phpcs-composer": "dev-trunk",
+    "yoast/wp-test-utils": "^1.2"
   },
   "scripts": {
-    "lint": "phpcs .",
-    "lint-fix": "phpcbf ."
+    "lint": "@php phpcs . --runtime-set testVersion 7.4-",
+    "lint-fix": "phpcbf .",
+    "test": "@php -r \"fwrite(STDERR, 'The PHPUnit tests run in wp-env.' . PHP_EOL . 'Start the environment: npm run env:start' . PHP_EOL . 'Run the tests: npm run test:php' . PHP_EOL); exit(1);\""
+  },
+  "scripts-descriptions": {
+    "test": "PHPUnit runs in wp-env: use `npm run test:php`."
   },
   "minimum-stability": "dev",
-  "prefer-stable": true
+  "prefer-stable": true,
+  "config": {
+    "allow-plugins": {
+      "composer/installers": true,
+      "dealerdirect/phpcodesniffer-composer-installer": true
+    }
+  }
 }

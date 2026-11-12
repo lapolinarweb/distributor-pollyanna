@@ -7,6 +7,9 @@
 
 namespace Distributor\PushUI;
 
+use Distributor\EnqueueScript;
+use Distributor\Utils;
+
 /**
  * Setup actions and filters
  *
@@ -15,7 +18,7 @@ namespace Distributor\PushUI;
 function setup() {
 	add_action(
 		'plugins_loaded',
-		function() {
+		function () {
 			add_action( 'admin_enqueue_scripts', __NAMESPACE__ . '\enqueue_scripts' );
 			add_action( 'wp_enqueue_scripts', __NAMESPACE__ . '\enqueue_scripts' );
 			add_filter( 'amp_dev_mode_element_xpaths', __NAMESPACE__ . '\add_element_xpaths' );
@@ -36,41 +39,56 @@ function setup() {
  * @return  bool
  */
 function syndicatable() {
+	// Retrieve the current global post, bail if not set.
+	$post = get_post();
+	if ( empty( $post ) ) {
+		return false;
+	}
+
 	/**
 	 * Filter Distributor capabilities allowed to syndicate content.
 	 *
-	 * @hook dt_syndicatable_capabilities
+	 * @tutorial snippets
 	 *
 	 * @param string edit_posts The capability allowed to syndicate content.
+	 *
+	 * @return string The capability allowed to syndicate content.
 	 */
 	if ( ! is_user_logged_in() || ! current_user_can( apply_filters( 'dt_syndicatable_capabilities', 'edit_posts' ) ) ) {
 		return false;
 	}
 
+	$distributable_post_types = \Distributor\Utils\distributable_post_types();
+
+	/**
+	 * Filter the post types that should be available for push.
+	 *
+	 * Helpful for sites that want to push custom post type content to another site.
+	 *
+	 * @param array Post types that are distributable.
+	 *
+	 * @return array Post types available for push.
+	 */
+	$distributable_post_types = apply_filters( 'dt_available_push_post_types', $distributable_post_types );
+
 	if ( is_admin() ) {
 
 		global $pagenow;
 
-		if ( 'post.php' !== $pagenow ) {
+		if ( 'post.php' !== $pagenow && 'post-new.php' !== $pagenow ) {
 			return false;
 		}
-	} else {
-		if ( ! is_singular( \Distributor\Utils\distributable_post_types() ) ) {
+	} elseif ( ! is_singular( $distributable_post_types ) ) {
 			return false;
-		}
 	}
 
-	global $post;
-
-	if ( empty( $post ) ) {
-		return;
-	}
-
-	if ( ! in_array( $post->post_status, \Distributor\Utils\distributable_post_statuses(), true ) ) {
+	// If we're using the classic editor, we need to make sure the post has a distributable status.
+	if ( ! Utils\is_using_gutenberg( $post ) && ! in_array( $post->post_status, Utils\distributable_post_statuses(), true ) ) {
 		return false;
 	}
 
-	if ( ! in_array( get_post_type(), \Distributor\Utils\distributable_post_types(), true ) || ( ! empty( $_GET['post_type'] ) && 'dt_ext_connection' === $_GET['post_type'] ) ) { // @codingStandardsIgnoreLine Nonce not required
+	$distributable_post_types = array_diff( $distributable_post_types, array( 'dt_ext_connection' ) );
+	if ( ! in_array( get_post_type(), $distributable_post_types, true ) ) {
 		return false;
 	}
 
@@ -135,7 +153,18 @@ function get_connections() {
 	$external_connections_query = new \WP_Query(
 		array(
 			'post_type'      => 'dt_ext_connection',
-			'posts_per_page' => 200, // @codingStandardsIgnoreLine This high pagination limit is purposeful
+			/**
+			 * Filter the maximum number of external connections to load.
+			 *
+			 * Modify the maximum number of external connection post types are
+			 * queried with requesting the post type.
+			 *
+			 * @since 2.2.0
+			 *
+			 * @param int $max_connections The maximum number of external connections to load.
+			 * @return int The maximum number of external connections to load.
+			 */
+			'posts_per_page' => apply_filters( 'dt_external_connections_per_page', 200 ), // @codingStandardsIgnoreLine This high pagination limit is purposeful
 			'no_found_rows'  => true,
 			'post_status'    => 'publish',
 		)
@@ -173,11 +202,10 @@ function get_connections() {
 		 * Filter Distributor capabilities allowed to push content.
 		 *
 		 * @since 1.0.0
-		 * @hook dt_push_capabilities
 		 *
-		 * @param {string} 'manage_options' The capability allowed to push content.
+		 * @param string 'manage_options' The capability allowed to push content.
 		 *
-		 * @return {string} The capability allowed to push content.
+		 * @return string The capability allowed to push content.
 		 */
 		if ( ! current_user_can( apply_filters( 'dt_push_capabilities', 'manage_options' ) ) ) {
 			$current_user_roles = (array) wp_get_current_user()->roles;
@@ -223,12 +251,17 @@ function get_connections() {
  */
 function ajax_push() {
 	if ( ! check_ajax_referer( 'dt-push', 'nonce', false ) ) {
-		wp_send_json_error( new \WP_Error( 'invalid-referal', __( 'Invalid Ajax referer.', 'distributor' ) ) );
+		wp_send_json_error( new \WP_Error( 'invalid-referral', __( 'Invalid Ajax referer.', 'distributor' ) ) );
 		exit;
 	}
 
-	if ( empty( $_POST['postId'] ) ) {
+	if ( empty( $_POST['postId'] ) || ! is_numeric( $_POST['postId'] ) ) {
 		wp_send_json_error( new \WP_Error( 'no-post-id', __( 'No post ID provided.', 'distributor' ) ) );
+		exit;
+	}
+
+	if ( ! current_user_can( 'edit_post', intval( $_POST['postId'] ) ) ) {
+		wp_send_json_error( new \WP_Error( 'insufficient-permissions', __( 'You do not have permission to push this post.', 'distributor' ) ) );
 		exit;
 	}
 
@@ -236,6 +269,7 @@ function ajax_push() {
 		wp_send_json_error( new \WP_Error( 'no-connection', __( 'No connection provided.', 'distributor' ) ) );
 		exit;
 	}
+	$connections = array_filter( array_map( 'distributor_sanitize_connection', wp_unslash( $_POST['connections'] ) ) );
 
 	$connection_map = get_post_meta( intval( $_POST['postId'] ), 'dt_connection_map', true );
 	if ( empty( $connection_map ) ) {
@@ -253,7 +287,7 @@ function ajax_push() {
 	$external_push_results = array();
 	$internal_push_results = array();
 
-	foreach ( $_POST['connections'] as $connection ) {
+	foreach ( $connections as $connection ) {
 		if ( 'external' === $connection['type'] ) {
 			$external_connection_type = get_post_meta( $connection['id'], 'dt_external_connection_type', true );
 			$external_connection_url  = get_post_meta( $connection['id'], 'dt_external_connection_url', true );
@@ -277,7 +311,7 @@ function ajax_push() {
 				}
 
 				if ( ! empty( $_POST['postStatus'] ) ) {
-					$push_args['post_status'] = $_POST['postStatus'];
+					$push_args['post_status'] = sanitize_key( wp_unslash( $_POST['postStatus'] ) );
 				}
 
 				$remote_post = $external_connection->push( intval( $_POST['postId'] ), $push_args );
@@ -304,7 +338,7 @@ function ajax_push() {
 						'errors'  => empty( $remote_post['push-errors'] ) ? array() : $remote_post['push-errors'],
 					);
 
-					$external_connection->log_sync( array( (int) $remote_post['id'] => $_POST['postId'] ) );
+					$external_connection->log_sync( array( (int) $remote_post['id'] => absint( wp_unslash( $_POST['postId'] ) ) ) );
 				} else {
 					$external_push_results[ (int) $connection['id'] ] = array(
 						'date'   => gmdate( 'F j, Y g:i a' ),
@@ -322,7 +356,37 @@ function ajax_push() {
 			}
 
 			if ( ! empty( $_POST['postStatus'] ) ) {
-				$push_args['post_status'] = esc_attr( $_POST['postStatus'] );
+				$push_args['post_status'] = sanitize_key( wp_unslash( $_POST['postStatus'] ) );
+			}
+
+			if ( get_current_blog_id() == $connection['id'] ) {
+				// Unable to push to current blog.
+				continue;
+			}
+
+			if ( ! is_super_admin() ) {
+				$post_type = get_post_type( intval( $_POST['postId'] ) );
+				// For users other than super admins, check permissions on destination site.
+				switch_to_blog( $connection['id'] );
+
+				$post_type_object = get_post_type_object( $post_type );
+
+				if ( ! empty( $push_args['remote_post_id'] ) ) {
+					if ( ! current_user_can( 'edit_post', $push_args['remote_post_id'] ) ) {
+						restore_current_blog();
+						continue;
+					}
+				} elseif ( 'draft' === $push_args['post_status'] ) {
+					if ( ! current_user_can( $post_type_object->cap->create_posts ) ) {
+						restore_current_blog();
+						continue;
+					}
+				} elseif ( ! current_user_can( $post_type_object->cap->publish_posts ) ) {
+					restore_current_blog();
+					continue;
+				}
+
+				restore_current_blog();
 			}
 
 			$remote_post = $internal_connection->push( intval( $_POST['postId'] ), $push_args );
@@ -379,42 +443,47 @@ function ajax_push() {
  * @param  string $hook WP hook.
  * @since  0.8
  */
-function enqueue_scripts( $hook ) {
+function enqueue_scripts( $hook ) { //phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found
 	if ( ! syndicatable() ) {
 		return;
 	}
 
-	wp_enqueue_style( 'dt-push', plugins_url( '/dist/css/push.min.css', __DIR__ ), array(), DT_VERSION );
-	wp_enqueue_script( 'dt-push', plugins_url( '/dist/js/push.min.js', __DIR__ ), array( 'jquery', 'underscore' ), DT_VERSION, true );
-	wp_localize_script(
-		'dt-push',
-		'dt',
-		array(
-			'nonce'                => wp_create_nonce( 'dt-push' ),
-			'loadConnectionsNonce' => wp_create_nonce( 'dt-load-connections' ),
-			'postId'               => (int) get_the_ID(),
-			'ajaxurl'              => esc_url( admin_url( 'admin-ajax.php' ) ),
-			'messages'             => array(
-				'ajax_error'   => __( 'Ajax error:', 'distributor' ),
-				'empty_result' => __( 'Received empty result.', 'distributor' ),
-			),
+	$push_script   = new EnqueueScript( 'dt-push', 'push.min' );
+	$localize_data = array(
+		'nonce'                => wp_create_nonce( 'dt-push' ),
+		'loadConnectionsNonce' => wp_create_nonce( 'dt-load-connections' ),
+		'postId'               => (int) get_the_ID(),
+		'postTitle'            => get_the_title(),
+		'postStatus'           => get_post_status(),
+		'ajaxurl'              => esc_url( admin_url( 'admin-ajax.php' ) ),
 
-			/**
-			 * Filter whether front end ajax requests should use xhrFields credentials:true.
-			 *
-			 * Front end ajax requests may require xhrFields with credentials when the front end and
-			 * back end domains do not match. This filter lets themes opt in.
-			 * See {@link https://vip.wordpress.com/documentation/handling-frontend-file-uploads/#handling-ajax-requests}
-			 *
-			 * @since 1.0.0
-			 * @hook dt_ajax_requires_with_credentials
-			 *
-			 * @param {bool} false Whether front end ajax requests should use xhrFields credentials:true.
-			 *
-			 * @return {bool} Whether front end ajax requests should use xhrFields credentials:true.
-			 */
-			'usexhr'               => apply_filters( 'dt_ajax_requires_with_credentials', false ),
-		)
+		/**
+		 * Filter whether front end ajax requests should use xhrFields credentials:true.
+		 *
+		 * Front end ajax requests may require xhrFields with credentials when the front end and
+		 * back end domains do not match. This filter lets themes opt in.
+		 * See {@link https://vip.wordpress.com/documentation/handling-frontend-file-uploads/#handling-ajax-requests}
+		 *
+		 * @since 1.0.0
+		 *
+		 * @param bool false Whether front end ajax requests should use xhrFields credentials:true.
+		 *
+		 * @return bool Whether front end ajax requests should use xhrFields credentials:true.
+		 */
+		'usexhr'               => apply_filters( 'dt_ajax_requires_with_credentials', false ),
+	);
+
+	$push_script
+		->load_in_footer()
+		->register_localize_data( 'dt', $localize_data )
+		->register_translations()
+		->enqueue();
+
+	wp_enqueue_style(
+		'dt-push',
+		plugins_url( '/dist/css/push.min.css', __DIR__ ),
+		array(),
+		$push_script->get_version()
 	);
 }
 
@@ -538,11 +607,12 @@ function menu_content() {
 		return;
 	}
 
-	$unlinked         = (bool) get_post_meta( $post->ID, 'dt_unlinked', true );
-	$original_blog_id = get_post_meta( $post->ID, 'dt_original_blog_id', true );
-	$original_post_id = get_post_meta( $post->ID, 'dt_original_post_id', true );
+	$unlinked              = (bool) get_post_meta( $post->ID, 'dt_unlinked', true );
+	$original_blog_id      = get_post_meta( $post->ID, 'dt_original_blog_id', true );
+	$original_post_id      = get_post_meta( $post->ID, 'dt_original_post_id', true );
+	$original_post_deleted = get_post_meta( $post->ID, 'dt_original_post_deleted', true );
 
-	if ( ! empty( $original_blog_id ) && ! empty( $original_post_id ) && ! $unlinked ) {
+	if ( ! empty( $original_blog_id ) && ! empty( $original_post_id ) && ! $unlinked && is_multisite() ) {
 		switch_to_blog( $original_blog_id );
 		$post_url  = get_permalink( $original_post_id );
 		$site_url  = home_url();
@@ -556,11 +626,38 @@ function menu_content() {
 			<div class="inner">
 				<p class="syndicated-notice">
 					<?php /* translators: %s: post type name */ ?>
-					<?php printf( esc_html__( 'This %s has been distributed from', 'distributor' ), esc_html( strtolower( $post_type_object->labels->singular_name ) ) ); ?>
-					<a href="<?php echo esc_url( $site_url ); ?>"><?php echo esc_html( $blog_name ); ?></a>.
 
-					<?php esc_html_e( 'You can ', 'distributor' ); ?>
-					<a href="<?php echo esc_url( $post_url ); ?>"><?php esc_html_e( 'view the original', 'distributor' ); ?></a>
+					<?php
+					printf(
+						/* translators: 1) Distributor post type singular name, 2) Source of content. */
+						esc_html__( 'This %1$s was distributed from %2$s.', 'distributor' ),
+						esc_html( strtolower( $post_type_object->labels->singular_name ) ),
+						'<a href="' . esc_url( $site_url ) . '">' . esc_html( $blog_name ) . '</a>'
+					);
+
+					if ( $original_post_deleted ) {
+						echo ' '; // Ensure whitespace between sentences.
+						printf(
+							/* translators: 1: post type name */
+							esc_html__( 'However, the origin %1$s has been deleted.', 'distributor' ),
+							esc_html( strtolower( $post_type_object->labels->singular_name ) )
+						);
+					} elseif ( ! empty( $post_url ) ) {
+						?>
+						<a href="<?php echo esc_url( $post_url ); ?>" target="_blank">
+							<?php
+							echo wp_kses_post(
+								sprintf(
+									/* translators: 1) Distributor post type singular name. */
+									__( 'View the origin %1$s.', 'distributor' ),
+									esc_html( strtolower( $post_type_object->labels->singular_name ) ),
+								)
+							);
+							?>
+						</a>
+						<?php
+					}
+					?>
 				</p>
 			</div>
 		</div>
@@ -594,6 +691,7 @@ function menu_content() {
 				<div class="loader-messages messages">
 					<div class="dt-error">
 						<?php esc_html_e( 'There was an issue loading connections.', 'distributor' ); ?>
+						<ul class="details"></ul>
 					</div>
 				</div>
 			</div>

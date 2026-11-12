@@ -4,7 +4,7 @@
  *
  * @package  distributor
  */
-
+//phpcs:ignoreFile WordPressVIPMinimum.Security.Mustache.OutputNotation
 ?>
 
 <script id="dt-add-connection" type="text/html">
@@ -12,7 +12,7 @@
 		<# if ('internal' === connection.type) { #>
 			<span>{{ connection.url }}</span>
 		<# } else { #>
-			<span>{{{ connection.name }}}</span>
+			<span>{{ connection.name }}</span>
 		<# } #>
 
 		<# if (connection.syndicated) { #>

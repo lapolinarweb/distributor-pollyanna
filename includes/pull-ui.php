@@ -7,6 +7,9 @@
 
 namespace Distributor\PullUI;
 
+//phpcs:ignoreFile WordPressVIPMinimum.Functions.RestrictedFunctions.cookies_setcookie -- Admin file, no full page caching.
+use Distributor\EnqueueScript;
+
 /**
  * Setup actions and filters
  *
@@ -57,7 +60,18 @@ function setup_list_table() {
 			'post_type'      => 'dt_ext_connection',
 			'fields'         => 'ids',
 			'no_found_rows'  => true,
-			'posts_per_page' => 100,
+			/**
+			 * Filter the maximum number of external connections to load.
+			 *
+			 * Modify the maximum number of external connection post types are
+			 * queried with requesting the post type.
+			 *
+			 * @since 2.2.0
+			 *
+			 * @param int $max_connections The maximum number of external connections to load.
+			 * @return int The maximum number of external connections to load.
+			 */
+			'posts_per_page' => apply_filters( 'dt_external_connections_per_page', 200 ), // @codingStandardsIgnoreLine This high pagination limit is purposeful
 		)
 	);
 
@@ -118,16 +132,16 @@ function admin_enqueue_scripts( $hook ) {
 		return;
 	}
 
-	wp_enqueue_script( 'dt-admin-pull', plugins_url( '/dist/js/admin-pull.min.js', __DIR__ ), array( 'jquery' ), DT_VERSION, true );
-	wp_enqueue_style( 'dt-admin-pull', plugins_url( '/dist/css/admin-pull-table.min.css', __DIR__ ), array(), DT_VERSION );
+	$admin_pull_script = new EnqueueScript( 'admin-pull', 'admin-pull.min' );
+	$admin_pull_script->load_in_footer()
+		->register_translations()
+		->enqueue();
 
-	wp_localize_script(
+	wp_enqueue_style(
 		'dt-admin-pull',
-		'dt',
-		[
-			'pull'     => __( 'Pull', 'distributor' ),
-			'as_draft' => __( 'Pull as draft', 'distributor' ),
-		]
+		plugins_url( '/dist/css/admin-pull-table.min.css', __DIR__ ),
+		array(),
+		$admin_pull_script->get_version()
 	);
 }
 
@@ -145,11 +159,10 @@ function action_admin_menu() {
 		 * Filter Distributor capabilities allowed to pull content.
 		 *
 		 * @since 1.0.0
-		 * @hook dt_pull_capabilities
 		 *
-		 * @param {string} 'manage_options' The capability allowed to pull content.
+		 * @param string 'manage_options' The capability allowed to pull content.
 		 *
-		 * @return {string} The capability allowed to pull content.
+		 * @return string The capability allowed to pull content.
 		 */
 		apply_filters( 'dt_pull_capabilities', 'manage_options' ),
 		'pull',
@@ -201,7 +214,7 @@ function process_actions() {
 	switch ( $connection_list_table->current_action() ) {
 		case 'syndicate':
 		case 'bulk-syndicate':
-			if ( ! wp_verify_nonce( $_GET['_wpnonce'], 'bulk-distributor_page_pull' ) ) {
+			if ( empty( $_GET['_wpnonce'] ) || ! wp_verify_nonce( $_GET['_wpnonce'], 'bulk-distributor_page_pull' ) ) {
 				exit;
 			}
 
@@ -214,11 +227,11 @@ function process_actions() {
 				);
 			}
 
-			if ( empty( $_GET['connection_type'] ) || empty( $_GET['connection_id'] ) || empty( $_GET['post'] ) ) {
+			if ( empty( $_GET['pull_post_type'] ) || empty( $_GET['connection_type'] ) || empty( $_GET['connection_id'] ) || empty( $_GET['post'] ) ) {
 				break;
 			}
 
-			$posts       = (array) $_GET['post'];
+			$posts       = array_map( 'intval', (array) wp_unslash( $_GET['post'] ) );
 			$post_type   = sanitize_text_field( $_GET['pull_post_type'] );
 			$post_status = ! empty( $_GET['dt_as_draft'] ) && 'draft' === $_GET['dt_as_draft'] ? 'draft' : '';
 
@@ -312,10 +325,7 @@ function process_actions() {
 				$connection = new \Distributor\InternalConnections\NetworkSiteConnection( $site );
 			}
 
-			$posts = $_GET['post'];
-			if ( ! is_array( $posts ) ) {
-				$posts = [ $posts ];
-			}
+			$posts = array_map( 'intval', (array) wp_unslash( $_GET['post'] ) );
 
 			$post_mapping = array();
 
@@ -356,10 +366,7 @@ function process_actions() {
 				$connection = new \Distributor\InternalConnections\NetworkSiteConnection( $site );
 			}
 
-			$posts = $_GET['post'];
-			if ( ! is_array( $posts ) ) {
-				$posts = [ $posts ];
-			}
+			$posts = array_map( 'intval', (array) wp_unslash( $_GET['post'] ) );
 
 			$sync_log = $connection->get_sync_log( intval( $_GET['connection_id'] ) );
 
@@ -414,19 +421,26 @@ function dashboard() {
 	<div class="wrap nosubsub">
 		<h1>
 			<?php
+			$dt_pull_url_id = 0;
+			$dt_pull_urls   = array();
 			if ( empty( $connection_list_table->connection_objects ) ) :
 				$connection_now = 0;
 				?>
-				<?php esc_html_e( 'No Connections to Pull from,', 'distributor' ); ?>
-
-				<a href="<?php echo esc_url( admin_url( 'post-new.php?post_type=dt_ext_connection' ) ); ?>"><?php esc_html_e( 'Create One?', 'distributor' ); ?></a>
-
+				<?php
+				echo wp_kses_post(
+					sprintf(
+						/* translators: %s: link to add new connection */
+						__( 'No connections to pull from, <a href="%s">create one?</a>', 'distributor' ),
+						esc_url( admin_url( 'post-new.php?post_type=dt_ext_connection' ) )
+					)
+				);
+				?>
 			<?php else : ?>
 				<?php esc_html_e( 'Pull Content from', 'distributor' ); ?>
 				<select id="pull_connections" name="connection" method="get">
 					<?php if ( ! empty( $internal_connection_group ) ) : ?>
 						<?php if ( ! empty( $external_connection_group ) ) : ?>
-							<optgroup label="<?php esc_html_e( 'Network Connections', 'distributor' ); ?>">
+							<optgroup label="<?php esc_attr_e( 'Network Connections', 'distributor' ); ?>">
 						<?php endif; ?>
 							<?php
 							foreach ( $internal_connection_group as $connection ) :
@@ -434,12 +448,14 @@ function dashboard() {
 								$type     = 'internal';
 								$name     = untrailingslashit( $connection->site->domain . $connection->site->path );
 								$id       = $connection->site->blog_id;
+								++$dt_pull_url_id;
+								$dt_pull_urls[ $dt_pull_url_id ] = sanitize_url( admin_url( 'admin.php?page=pull&connection_type=' . $type . '&connection_id=' . $id ) );
 
 								if ( is_a( $connection_now, '\Distributor\InternalConnections\NetworkSiteConnection' ) && (int) $connection_now->site->blog_id === (int) $id ) {
 									$selected = true;
 								}
 								?>
-								<option <?php selected( true, $selected ); ?> data-pull-url="<?php echo esc_url( admin_url( 'admin.php?page=pull&connection_type=' . $type . '&connection_id=' . $id ) ); ?>"><?php echo esc_html( $name ); ?></option>
+								<option <?php selected( true, $selected ); ?> data-pull-url-id="<?php echo esc_attr( $dt_pull_url_id ); ?>"><?php echo esc_html( $name ); ?></option>
 							<?php endforeach; ?>
 						<?php if ( ! empty( $external_connection_group ) ) : ?>
 							</optgroup>
@@ -448,7 +464,7 @@ function dashboard() {
 
 					<?php if ( ! empty( $external_connection_group ) ) : ?>
 						<?php if ( ! empty( $internal_connection_group ) ) : ?>
-							<optgroup label="<?php esc_html_e( 'External Connections', 'distributor' ); ?>">
+							<optgroup label="<?php esc_attr_e( 'External Connections', 'distributor' ); ?>">
 						<?php endif; ?>
 							<?php
 							foreach ( $external_connection_group as $connection ) :
@@ -456,40 +472,80 @@ function dashboard() {
 								$selected = false;
 								$name     = $connection->name;
 								$id       = $connection->id;
+								++$dt_pull_url_id;
+								$dt_pull_urls[ $dt_pull_url_id ] = sanitize_url( admin_url( 'admin.php?page=pull&connection_type=' . $type . '&connection_id=' . $id ) );
 
 								if ( is_a( $connection_now, '\Distributor\ExternalConnection' ) && (int) $connection_now->id === (int) $id ) {
 									$selected = true;
 								}
 								?>
-								<option <?php selected( true, $selected ); ?> data-pull-url="<?php echo esc_url( admin_url( 'admin.php?page=pull&connection_type=' . $type . '&connection_id=' . $id ) ); ?>"><?php echo esc_html( $name ); ?></option>
+								<option <?php selected( true, $selected ); ?> data-pull-url-id="<?php echo esc_attr( $dt_pull_url_id ); ?>"><?php echo esc_html( $name ); ?></option>
 							<?php endforeach; ?>
 						<?php if ( ! empty( $internal_connection_group ) ) : ?>
 							</optgroup>
 						<?php endif; ?>
 					<?php endif; ?>
 				</select>
+				<script>
+					DISTRIBUTOR = window.DISTRIBUTOR || {};
+					DISTRIBUTOR.getPullUrl = function( pullUrlId ) {
+						var distributorPullUrls = <?php echo wp_json_encode( $dt_pull_urls ); ?>;
+
+						if ( ! pullUrlId || ! distributorPullUrls[ pullUrlId ] ) {
+							return;
+						}
+
+						return distributorPullUrls[ pullUrlId ];
+					}
+				</script>
 
 				<?php
+				$connection_now->pull_post_type  = '';
 				$connection_now->pull_post_types = \Distributor\Utils\available_pull_post_types( $connection_now, $connection_type );
 
 				// Ensure we have at least one post type to pull.
 				$connection_now->pull_post_type = '';
 				if ( ! empty( $connection_now->pull_post_types ) ) {
-					$connection_now->pull_post_type = ( 'internal' === $connection_type ) ? 'all' : $connection_now->pull_post_types[0]['slug'];
+					$connection_now->pull_post_type = 'all';
 				}
 
 				// Set the post type we want to pull (if any)
 				// This is either from a query param, "post" post type, or the first in the list
 				foreach ( $connection_now->pull_post_types as $post_type ) {
-					if ( isset( $_GET['pull_post_type'] ) ) { // @codingStandardsIgnoreLine No nonce needed here.
-						if ( $_GET['pull_post_type'] === $post_type['slug'] ) { // @codingStandardsIgnoreLine Comparing values, no nonce needed.
+					if ( ! empty( $_GET['pull_post_type'] ) ) {
+						if ( 'all' === $_GET['pull_post_type'] ) {
+							$connection_now->pull_post_type = 'all';
+							break;
+						} elseif ( $_GET['pull_post_type'] === $post_type['slug'] ) {
 							$connection_now->pull_post_type = $post_type['slug'];
 							break;
 						}
 					} else {
-						if ( 'post' === $post_type['slug'] && 'external' === $connection_type ) {
-							$connection_now->pull_post_type = $post_type['slug'];
-							break;
+						$connection_now->pull_post_type = ! empty( $post_type['slug'] ) ? $post_type['slug'] : 'all';
+						break;
+					}
+				}
+
+				// Get the supported taxonomies for the post types.
+				$supported_taxonomies = [];
+				foreach ( $connection_now->pull_post_types as $post_type ) {
+					$supported_taxonomies[ $post_type['slug'] ] = $post_type['taxonomies'];
+				}
+
+				// Get the available taxonomy terms.
+				$connection_now->pull_taxonomy_term = [];
+				$connection_now->pull_taxonomy_terms = \Distributor\Utils\available_pull_taxonomy_terms( $connection_now, $connection_type, $supported_taxonomies );
+				if ( ! empty( $connection_now->pull_taxonomy_terms ) ) {
+
+					foreach ( $connection_now->pull_taxonomy_terms as $taxonomy => $taxonomy_data ) {
+
+						$term_slugs = wp_list_pluck( $taxonomy_data['items'], 'slug' );
+
+						// Set the taxonomy term to pull.
+						if ( isset( $_GET["pull_{$taxonomy}"] ) && in_array( $_GET["pull_{$taxonomy}"], $term_slugs, true ) ) {
+							$connection_now->pull_taxonomy_term[ $taxonomy ] = $_GET["pull_{$taxonomy}"];
+						} else {
+							$connection_now->pull_taxonomy_term[ $taxonomy ] = 'all';
 						}
 					}
 				}
@@ -527,9 +583,22 @@ function dashboard() {
 		<?php $connection_list_table->prepare_items(); ?>
 
 		<?php if ( ! empty( $connection_list_table->pull_error ) ) : ?>
-			<p><?php esc_html_e( 'Could not pull content from connection due to error.', 'distributor' ); ?></p>
+			<div class="notice notice-error">
+				<p><?php esc_html_e( 'Could not pull content from connection due to error.', 'distributor' ); ?></p>
+				<ul>
+					<?php foreach ( $connection_list_table->pull_error as $error ) : ?>
+					<li>
+						<ul>
+							<li><?php echo esc_html( $error ); ?></li>
+						</ul>
+					</li>
+					<?php endforeach; ?>
+				</ul>
+			</div>
 		<?php else : ?>
 			<?php $connection_list_table->views(); ?>
+
+			<?php $connection_list_table->search_box( esc_html__( 'Search', 'distributor' ), 'post' ); ?>
 
 			<form id="posts-filter" class="status-<?php echo ( ! empty( $_GET['status'] ) ) ? esc_attr( $_GET['status'] ) : 'new'; // @codingStandardsIgnoreLine Nonce not needed. ?>" method="get">
 				<?php if ( ! empty( $connection_list_table->connection_objects ) ) : ?>
@@ -538,8 +607,6 @@ function dashboard() {
 				<?php endif; ?>
 
 				<input type="hidden" name="page" value="pull">
-
-				<?php $connection_list_table->search_box( esc_html__( 'Search', 'distributor' ), 'post' ); ?>
 
 				<?php $connection_list_table->display(); ?>
 			</form>
@@ -556,14 +623,17 @@ function dashboard() {
 function output_pull_errors() {
 	global $connection_now;
 
+	// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- No nonce needed here.
 	if ( empty( $_GET['connection_id'] ) ) {
 		return;
 	}
 
 	if ( is_a( $connection_now, '\Distributor\ExternalConnection' ) ) {
 		$error_key = "external_{$connection_now->id}";
-	} else {
+	} elseif ( is_a( $connection_now, '\Distributor\InternalConnections\NetworkSiteConnection' ) ) {
 		$error_key = "internal_{$connection_now->site->blog_id}";
+	} else {
+		return;
 	}
 
 	$pull_errors = get_transient( 'dt_connection_pull_errors_' . $error_key );
